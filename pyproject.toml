@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nesso"
+version = "1.0.0"
+requires-python = ">=3.10,<3.13"
+description = "Nesso-1: Accelerating Open-Source Binding Affinity Predictions"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "torch>=2.2",
+    "numpy>=2.0",
+    "lightning>=2.6.0",
+    "rdkit>=2024.3.2",
+    "einops>=0.8.0",
+    "mashumaro>=3.14",
+    "safetensors>=0.7.0",
+    "transformers>=4.40.0",
+    "scipy>=1.13.0",
+    "pyyaml",
+    "click>=8.1.7",
+    "tqdm",
+    "huggingface_hub>=1.5.0",
+]
+
+[project.scripts]
+nesso = "nesso.main:cli"
+
+[project.optional-dependencies]
+kernels = [
+    "cuequivariance-torch",
+    "cuequivariance-ops-torch-cu12",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.7.0",
+    "pre-commit>=3.0.0",
+    "ipykernel>=6.0.0",
+    "ipywidgets>=8.0.0",
+    "pytest"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nesso*"]
+
+[tool.setuptools.data-files]
+"licenses" = ["licenses/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff.lint]
+ignore = ["E402", "E741", "E731"]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
