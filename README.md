@@ -33,7 +33,7 @@ pip install "git+https://github.com/recursionpharma/nesso.git"
 <b><u>GPU / CUDA</u></b> : The `nesso` package relies on PyTorch. For GPU support, install a [CUDA-enabled PyTorch build](https://pytorch.org/get-started/locally/) first, then install `nesso`. To additionally enable [cuEquivariance](https://github.com/NVIDIA/cuEquivariance) kernels for extra speedups (CUDA 12 only; Apache License 2.0):
 
 ```bash
-pip install "git+https://github.com/recursionpharma/nesso.git#egg=nesso[kernels]"
+pip install "nesso[kernels] @ git+https://github.com/recursionpharma/nesso.git"
 ```
 
 If the kernels extra fails to install or you are running on CPU, use the default install and/or pass `--no_kernels` at runtime.
