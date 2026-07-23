@@ -70,21 +70,6 @@ def extract_esm_features(
     return s_chain
 
 
-def _compute_disto_target(
-    disto_coords: Tensor,
-    min_dist: float = 2.0,
-    max_dist: float = 22.0,
-    num_bins: int = 64,
-) -> Tensor:
-    """Compute one-hot distogram from token disto coordinates."""
-    t_dists = torch.cdist(disto_coords.float(), disto_coords.float())
-    boundaries = torch.linspace(
-        min_dist, max_dist, num_bins - 1, device=disto_coords.device
-    )
-    distogram = (t_dists.unsqueeze(-1) > boundaries).sum(dim=-1).long().contiguous()
-    return one_hot(distogram, num_classes=num_bins).float()
-
-
 def select_subset_from_mask(mask: np.ndarray, p: float) -> np.ndarray:
     """Subsample True entries in mask using a geometric draw."""
     num_true = int(np.sum(mask))
@@ -163,12 +148,6 @@ def process_token_features(  # noqa: C901, PLR0915, PLR0912
     # Token mask features
     pad_mask = torch.ones(len(token_data), dtype=torch.float)
     disto_mask = from_numpy(token_data["disto_mask"].copy()).float()
-
-    # Distogram target from token disto_coords
-    disto_coords = from_numpy(token_data["disto_coords"].copy())
-    disto_target = _compute_disto_target(
-        disto_coords, min_dist=min_dist, max_dist=max_dist, num_bins=num_dist_bins
-    )
 
     # Token bond features
     if max_tokens is not None:
@@ -275,7 +254,6 @@ def process_token_features(  # noqa: C901, PLR0915, PLR0912
             res_type = pad_dim(res_type, 0, pad_len)
             pad_mask = pad_dim(pad_mask, 0, pad_len)
             disto_mask = pad_dim(disto_mask, 0, pad_len)
-            disto_target = pad_dim(pad_dim(disto_target, 0, pad_len), 1, pad_len)
             unspecified_oh = torch.zeros(
                 pad_len, len(const.pocket_contact_info), dtype=torch.float32
             )
@@ -294,7 +272,6 @@ def process_token_features(  # noqa: C901, PLR0915, PLR0912
         "type_bonds": bonds_type,
         "token_pad_mask": pad_mask,
         "token_disto_mask": disto_mask,
-        "disto_target": disto_target,
         "pocket_feature": pocket_feature,
     }
 
@@ -353,7 +330,6 @@ def process_atom_features(
     ref_space_uid_list = []
     coord_data_list = []
     atom_to_token_list = []
-    token_to_rep_atom_list = []
     resolved_mask_list = []
 
     chain_res_ids = {}
@@ -428,11 +404,6 @@ def process_atom_features(
             conformer_pos = random.randn(n_atoms, 3).astype(np.float32)
         atom_conformer_list.append(conformer_pos)
 
-        disto_in_valid = next(
-            i for i, v in enumerate(valid_indices) if v == token["disto_idx"]
-        )
-        token_to_rep_atom_list.append(atom_idx + disto_in_valid)
-
         token_coords = structure.coords[offset + np.array(valid_indices)]["coords"]
         coord_data_list.append(token_coords[np.newaxis, ...])
         resolved_mask_list.append(token_atoms["is_present"].copy())
@@ -482,14 +453,6 @@ def process_atom_features(
         torch.tensor(atom_to_token_list, dtype=torch.long),
         num_classes=num_token_classes,
     )
-    token_to_rep_atom = one_hot(
-        torch.tensor(token_to_rep_atom_list, dtype=torch.long).clamp(
-            0, max(0, num_atoms - 1)
-        ),
-        num_classes=num_atoms,
-    )
-    if max_tokens is not None and L < max_tokens:
-        token_to_rep_atom = pad_dim(token_to_rep_atom, 0, max_tokens - L)
 
     pad_len = (
         (num_atoms - 1) // atoms_per_window_queries + 1
@@ -507,9 +470,8 @@ def process_atom_features(
         ref_space_uid = pad_dim(ref_space_uid, 0, pad_len)
         coords = pad_dim(coords, 1, pad_len)
         atom_to_token = pad_dim(atom_to_token, 0, pad_len)
-        token_to_rep_atom = pad_dim(token_to_rep_atom, 1, pad_len)
 
-    return {
+    atom_features = {
         "ref_pos": ref_pos,
         "atom_resolved_mask": resolved_mask,
         "ref_atom_name_chars": ref_atom_name_chars,
@@ -521,9 +483,9 @@ def process_atom_features(
         "coords": coords,
         "atom_pad_mask": pad_mask,
         "atom_to_token": atom_to_token,
-        "token_to_rep_atom": token_to_rep_atom,
         "res_index_to_conf_id": res_index_to_conf_id,
     }
+    return atom_features
 
 
 def process_esm_features(
