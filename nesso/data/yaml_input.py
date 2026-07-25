@@ -107,10 +107,42 @@ def _load_mol(
         return pickle.load(f)  # noqa: S301
 
 
-def get_conformer(mol: Chem.Mol) -> Chem.Conformer:
+DEFAULT_CONFORMER_SEED = 42
+
+# RDKit takes a signed 32-bit seed; -1 means "pick a random one".
+_MAX_RDKIT_SEED = 2**31 - 1
+
+
+def conformer_seed(mol: Chem.Mol, base_seed: int) -> int:
+    """Derive a stable ETKDG seed for ``mol``.
+
+    The seed is a function of ``base_seed`` and the molecule's canonical SMILES,
+    deliberately **not** of processing order: ``preprocess_yamls`` parses inputs in a
+    ``ProcessPoolExecutor``, so a counter-based scheme would vary with worker
+    scheduling and with ``--num_workers``. Keying on the molecule also means the same
+    ligand embeds identically wherever it appears.
+    """
+    try:
+        key = Chem.MolToSmiles(mol)
+    except Exception:  # unsanitized/exotic mol: fall back to a structural key
+        key = f"{mol.GetNumAtoms()}:{mol.GetNumBonds()}"
+    digest = hashlib.sha256(f"{base_seed}:{key}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") % _MAX_RDKIT_SEED
+
+
+def get_conformer(
+    mol: Chem.Mol, base_seed: int | None = DEFAULT_CONFORMER_SEED
+) -> Chem.Conformer:
+    """Return conformer 0, embedding one with ETKDG if the molecule has none.
+
+    ``base_seed`` makes embedding reproducible; pass ``None`` for RDKit's default
+    non-deterministic behaviour.
+    """
     if mol.GetNumConformers() == 0:
         opts = AllChem.ETKDGv3()
         opts.clearConfs = False
+        if base_seed is not None:
+            opts.randomSeed = conformer_seed(mol, base_seed)
         cid = AllChem.EmbedMolecule(mol, opts)
         if cid < 0:
             opts.useRandomCoords = True
@@ -124,6 +156,7 @@ def _standard_residue(
     res_idx: int,
     *,
     ccd_dict: dict[str, Chem.Mol] | None = None,
+    base_seed: int | None = DEFAULT_CONFORMER_SEED,
 ) -> dict[str, Any]:
     name = "MET" if res_name == "MSE" else res_name
     if name not in const.ref_atoms or not const.ref_atoms[name]:
@@ -131,7 +164,7 @@ def _standard_residue(
         raise ValueError(msg)
     mol = _load_mol(mol_dir, name, ccd_dict=ccd_dict)
     mol = Chem.RemoveHs(mol, sanitize=False)
-    conf = get_conformer(mol)
+    conf = get_conformer(mol, base_seed)
     by_name = {a.GetProp("name"): a for a in mol.GetAtoms()}
     atoms: list[dict[str, Any]] = []
     for atom_name in const.ref_atoms[name]:
@@ -162,21 +195,27 @@ def _protein_residues(
     mol_dir: Path | None,
     *,
     ccd_dict: dict[str, Chem.Mol] | None = None,
+    base_seed: int | None = DEFAULT_CONFORMER_SEED,
 ) -> tuple[int, list[dict[str, Any]]]:
     cmap = const.prot_letter_to_token
     unk = const.unk_token["PROTEIN"]
     mol_type = const.chain_type_ids["PROTEIN"]
     residues = [
-        _standard_residue(cmap.get(c, unk), mol_dir, j, ccd_dict=ccd_dict)
+        _standard_residue(
+            cmap.get(c, unk), mol_dir, j, ccd_dict=ccd_dict, base_seed=base_seed
+        )
         for j, c in enumerate(raw_seq)
     ]
     return mol_type, residues
 
 
 def _ligand_residue_from_mol(
-    mol: Chem.Mol, res_name: str, res_idx: int
+    mol: Chem.Mol,
+    res_name: str,
+    res_idx: int,
+    base_seed: int | None = DEFAULT_CONFORMER_SEED,
 ) -> dict[str, Any]:
-    conf = get_conformer(mol)
+    conf = get_conformer(mol, base_seed)
     idx_map: dict[int, int] = {}
     atoms: list[dict[str, Any]] = []
     for atom in mol.GetAtoms():
@@ -222,6 +261,7 @@ def _ligand_from_conformer_pkl(
     mol_dir: Path | None = None,
     rid: str = "",
     record_id: str = "",
+    base_seed: int | None = DEFAULT_CONFORMER_SEED,
 ) -> tuple[int, list[dict[str, Any]]]:
     """Load an RDKit ``Mol`` (heavy-atom, with conformer) from ``path`` as a ligand residue."""
     with Path(path).open("rb") as f:
@@ -236,7 +276,7 @@ def _ligand_from_conformer_pkl(
         atom.SetProp("name", f"{sym}{int(rnk) + 1}"[:4])
     _dump_ligand_mol(mol, mol_dir, rid, record_id=record_id)
     return const.chain_type_ids["NONPOLYMER"], [
-        _ligand_residue_from_mol(mol, lig_tag, 0)
+        _ligand_residue_from_mol(mol, lig_tag, 0, base_seed)
     ]
 
 
@@ -263,6 +303,7 @@ def _ligand_smiles_residue(
     rid: str = "",
     *,
     record_id: str = "",
+    base_seed: int | None = DEFAULT_CONFORMER_SEED,
 ) -> tuple[int, list[dict[str, Any]]]:
     mol = Chem.MolFromSmiles(smi)
     if mol is None:
@@ -270,12 +311,12 @@ def _ligand_smiles_residue(
         raise ValueError(msg)
     mol = Chem.AddHs(mol)
     Chem.AssignStereochemistry(mol, force=True, cleanIt=True)
-    get_conformer(mol)
+    get_conformer(mol, base_seed)
     mol_nh = Chem.RemoveHs(mol, sanitize=False)
     _assign_ligand_atom_names(mol_nh)
     _dump_ligand_mol(mol_nh, mol_dir, rid, record_id=record_id)
     return const.chain_type_ids["NONPOLYMER"], [
-        _ligand_residue_from_mol(mol_nh, rid or "LIG", 0)
+        _ligand_residue_from_mol(mol_nh, rid or "LIG", 0, base_seed)
     ]
 
 
@@ -286,14 +327,15 @@ def _ligand_ccd_residue(
     ccd_dict: dict[str, Chem.Mol] | None = None,
     rid: str = "",
     record_id: str = "",
+    base_seed: int | None = DEFAULT_CONFORMER_SEED,
 ) -> tuple[int, list[dict[str, Any]]]:
     mol = _load_mol(mol_dir, ccd_code, ccd_dict=ccd_dict)
     mol = Chem.RemoveHs(mol, sanitize=False)
     _assign_ligand_atom_names(mol)
-    get_conformer(mol)
+    get_conformer(mol, base_seed)
     _dump_ligand_mol(mol, mol_dir, rid, record_id=record_id)
     return const.chain_type_ids["NONPOLYMER"], [
-        _ligand_residue_from_mol(mol, ccd_code, 0)
+        _ligand_residue_from_mol(mol, ccd_code, 0, base_seed)
     ]
 
 
@@ -303,6 +345,7 @@ def _ligand_sdf_residue(
     rid: str = "",
     *,
     record_id: str = "",
+    base_seed: int | None = DEFAULT_CONFORMER_SEED,
 ) -> tuple[int, list[dict[str, Any]]]:
     path = Path(sdf_path)
     if not path.exists():
@@ -313,10 +356,10 @@ def _ligand_sdf_residue(
         msg = f"Invalid SDF: {path}"
         raise ValueError(msg)
     _assign_ligand_atom_names(mol)
-    get_conformer(mol)
+    get_conformer(mol, base_seed)
     _dump_ligand_mol(mol, mol_dir, rid, record_id=record_id)
     return const.chain_type_ids["NONPOLYMER"], [
-        _ligand_residue_from_mol(mol, rid or "LIG", 0)
+        _ligand_residue_from_mol(mol, rid or "LIG", 0, base_seed)
     ]
 
 
@@ -344,10 +387,11 @@ def _chain_data_for_entity(
     ccd_dict: dict[str, Chem.Mol] | None = None,
     rid: str = "",
     record_id: str = "",
+    base_seed: int | None = DEFAULT_CONFORMER_SEED,
 ) -> _ChainData:
     if isinstance(entity, _EntityProtein):
         mol_type, residues = _protein_residues(
-            entity.sequence, mol_dir, ccd_dict=ccd_dict
+            entity.sequence, mol_dir, ccd_dict=ccd_dict, base_seed=base_seed
         )
     elif isinstance(entity, _EntityLigandSmiles):
         smiles_ligand_idx[0] += 1
@@ -358,10 +402,15 @@ def _chain_data_for_entity(
                 mol_dir=mol_dir,
                 rid=rid,
                 record_id=record_id,
+                base_seed=base_seed,
             )
         else:
             mol_type, residues = _ligand_smiles_residue(
-                entity.smiles, mol_dir=mol_dir, rid=rid, record_id=record_id
+                entity.smiles,
+                mol_dir=mol_dir,
+                rid=rid,
+                record_id=record_id,
+                base_seed=base_seed,
             )
     elif isinstance(entity, _EntityLigandCCD):
         mol_type, residues = _ligand_ccd_residue(
@@ -370,10 +419,15 @@ def _chain_data_for_entity(
             ccd_dict=ccd_dict,
             rid=rid,
             record_id=record_id,
+            base_seed=base_seed,
         )
     elif isinstance(entity, _EntityLigandSDF):
         mol_type, residues = _ligand_sdf_residue(
-            entity.sdf, mol_dir=mol_dir, rid=rid, record_id=record_id
+            entity.sdf,
+            mol_dir=mol_dir,
+            rid=rid,
+            record_id=record_id,
+            base_seed=base_seed,
         )
     else:
         raise TypeError(entity)
@@ -592,9 +646,13 @@ def parse_schema(
     *,
     ccd_dict: dict[str, Chem.Mol] | None = None,
     record_id: str = "record",
+    base_seed: int | None = DEFAULT_CONFORMER_SEED,
 ) -> tuple[Structure, Record, dict[int, str], dict[int, str]]:
     """Parse a YAML schema dict into
     ``(Structure, Record, entity_to_seq, entity_to_esm_path)``
+
+    ``base_seed`` seeds ETKDG conformer embedding so parsing is reproducible;
+    pass ``None`` for RDKit's default non-deterministic behaviour.
     """
     if not isinstance(schema, dict) or schema.get("version", 1) != 1:
         raise ValueError("Schema must be a dict with version: 1")
@@ -630,6 +688,7 @@ def parse_schema(
             ccd_dict=ccd_dict,
             rid=lid,
             record_id=record_id,
+            base_seed=base_seed,
         )
         data.entity_id = entity_id
         if isinstance(entity, _EntityProtein):
@@ -671,11 +730,13 @@ def parse_yaml(
     ccd_pkl: Path | None = None,
     ccd_dict: dict[str, Chem.Mol] | None = None,
     record_id: str | None = None,
+    base_seed: int | None = DEFAULT_CONFORMER_SEED,
 ) -> tuple[Structure, Record, dict[int, str], dict[int, str]]:
     """Parse YAML into ``(Structure, Record, entity_to_seq, entity_to_esm_path)``.
 
     ``ccd_dict`` (in-memory) takes precedence over ``ccd_pkl`` (disk); ``_load_mol``
     raises if a standard residue needs a CCD source that was not provided.
+    ``base_seed`` seeds ETKDG conformer embedding so parsing is reproducible.
     """
     if ccd_dict is None and ccd_pkl is not None:
         ccd_dict = load_ccd_mol_dict(ccd_pkl)
@@ -684,7 +745,9 @@ def parse_yaml(
         schema = yaml.safe_load(f)
 
     rid = record_id if record_id is not None else path.stem
-    return parse_schema(schema, mol_dir, ccd_dict=ccd_dict, record_id=rid)
+    return parse_schema(
+        schema, mol_dir, ccd_dict=ccd_dict, record_id=rid, base_seed=base_seed
+    )
 
 
 def esm_keys(entity_to_seq: dict[int, str]) -> dict[str, str]:

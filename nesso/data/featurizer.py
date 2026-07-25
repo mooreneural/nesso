@@ -469,12 +469,20 @@ def process_atom_features(
     center = center / resolved_mask.sum().clamp(min=1)
     coords = coords - center[:, None]
 
-    # Apply random roto-translation to the input conformers
+    # Apply random roto-translation to the input conformers.
+    # The generator is seeded from `random` (a per-record RandomState) rather than
+    # drawn from the global torch RNG, which is seeded per DataLoader worker and so
+    # would make `ref_pos` depend on `--num_workers`.
+    aug_generator = torch.Generator()
+    aug_generator.manual_seed(int(random.randint(0, 2**31 - 1)))
     for i in range(torch.max(ref_space_uid) + 1):
         included = ref_space_uid == i
         if torch.sum(included) > 0 and torch.any(resolved_mask[included]):
             ref_pos[included] = center_random_augmentation(
-                ref_pos[included][None], resolved_mask[included][None], centering=True
+                ref_pos[included][None],
+                resolved_mask[included][None],
+                centering=True,
+                generator=aug_generator,
             )[0]
 
     num_token_classes = max_tokens if max_tokens is not None else L

@@ -24,7 +24,11 @@ from tqdm import tqdm
 from nesso.data.inference import NessoInferenceDataModule
 from nesso.data.types import Manifest, Record
 from nesso.data.writer import NessoWriter
-from nesso.data.yaml_input import parse_yaml, validate_schema
+from nesso.data.yaml_input import (
+    DEFAULT_CONFORMER_SEED,
+    parse_yaml,
+    validate_schema,
+)
 from nesso.model.models.nesso1 import Nesso1
 
 from nesso.data.esm import (
@@ -164,8 +168,11 @@ def _process_single_yaml(
     mol_dir: Path,
     structures_dir: Path,
     records_dir: Path,
+    seed: int,
 ) -> Record:
-    struct, rec, _, _ = parse_yaml(yp, mol_dir, ccd_dict=_worker_ccd_dict)
+    struct, rec, _, _ = parse_yaml(
+        yp, mol_dir, ccd_dict=_worker_ccd_dict, base_seed=seed
+    )
     struct.dump(structures_dir / f"{rec.id}.npz")
     rec.dump(records_dir / f"{rec.id}.json")
     return rec
@@ -178,6 +185,7 @@ def preprocess_yamls(
     structures_dir: Path,
     records_dir: Path,
     num_workers: int = 2,
+    seed: int = DEFAULT_CONFORMER_SEED,
 ) -> tuple[Manifest, list[str]]:
     """Parse YAMLs into a Manifest, reporting which inputs failed.
 
@@ -192,11 +200,11 @@ def preprocess_yamls(
     failed: list[str] = []
 
     with ProcessPoolExecutor(
-        max_workers=num_workers, initializer=_init_worker, initargs=(ccd_pkl,)
+        max_workers=max(1, num_workers), initializer=_init_worker, initargs=(ccd_pkl,)
     ) as executor:
         futures = {
             executor.submit(
-                _process_single_yaml, yp, mol_dir, structures_dir, records_dir
+                _process_single_yaml, yp, mol_dir, structures_dir, records_dir, seed
             ): yp
             for yp in yaml_paths
         }
@@ -547,6 +555,7 @@ def predict(
         paths.structures_dir,
         paths.records_dir,
         num_workers=num_workers,
+        seed=seed,
     )
     manifest.dump(paths.manifest_path)
     if failed_preprocessing:
