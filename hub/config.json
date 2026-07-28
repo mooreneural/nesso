@@ -1,0 +1,11 @@
+{
+  "model_type": "nesso1",
+  "architectures": ["Nesso1"],
+  "library_name": "nesso",
+  "default_revision": "v1.0.0",
+  "files": {
+    "hparams": "hparams.json",
+    "weights": "model.safetensors",
+    "ccd": "ccd.pkl"
+  }
+}

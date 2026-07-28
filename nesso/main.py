@@ -39,6 +39,9 @@ HF_REPO_ID = "recursionpharma/nesso"
 FALLBACK_REVISION = "main"
 MODEL_WEIGHTS_NAME = "model.safetensors"
 MODEL_HPARAMS_NAME = "hparams.json"
+# Root query file used by the Hub for download counting (GET/HEAD on this path).
+# See https://huggingface.co/docs/hub/models-download-stats
+MODEL_CONFIG_NAME = "config.json"
 
 
 def get_default_model_revision() -> str:
@@ -109,6 +112,23 @@ def ensure_cache(
     if checkpoint is not None:
         model_dir = checkpoint
     else:
+        # Fetch the Hub query file so this load is counted in download stats.
+        # Always from ``main`` so version tags need not re-copy this file.
+        try:
+            from huggingface_hub.errors import EntryNotFoundError
+
+            hf_hub_download(
+                repo_id=HF_REPO_ID,
+                filename=MODEL_CONFIG_NAME,
+                revision="main",
+                cache_dir=hf_cache_dir,
+            )
+        except EntryNotFoundError as exc:
+            warnings.warn(
+                f"Could not download Hub query file {MODEL_CONFIG_NAME!r} "
+                f"(download stats will not increment): {exc}",
+                stacklevel=2,
+            )
         weights = Path(
             hf_hub_download(
                 repo_id=HF_REPO_ID,

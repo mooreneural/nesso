@@ -483,6 +483,19 @@ class Nesso1(LightningModule):
                 except PackageNotFoundError:
                     hub_revision = "main"
 
+            # Root ``config.json`` is the Hub download-stats query file; fetch it
+            # from ``main`` so Hub loads are counted (hparams/weights alone are not).
+            try:
+                from huggingface_hub.errors import EntryNotFoundError
+
+                hf_hub_download(
+                    repo_id=str(pretrained_model_name_or_path),
+                    filename="config.json",
+                    revision="main",
+                    cache_dir=cache_dir,
+                )
+            except EntryNotFoundError:
+                pass
             hparams_path = Path(
                 hf_hub_download(
                     repo_id=str(pretrained_model_name_or_path),
