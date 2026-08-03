@@ -1,14 +1,15 @@
-"""Inference featurization does not build training-only targets.
+"""Inference featurization emits exactly the expected set of features.
 
 The forward pass never reads ``disto_target`` or ``token_to_rep_atom`` (the
 ground-truth distogram label and the token-to-representative-atom gather
 inherited from the Boltz training featurizer). Since the codebase is
 inference-only, those tensors are not built at all.
 
-These tests pin that: the featurizer omits both keys, and the model forward is
-bit-identical whether or not those tensors are present in the batch (proving it
-never consumed them). Ligand-only input keeps this CCD-free so it runs on plain
-CI.
+These tests pin that from both sides: the featurizer produces exactly
+``EXPECTED_FEATURE_KEYS`` (so an unintended addition or removal fails here, not
+just the two keys this change targets), and the model forward is bit-identical
+whether or not those tensors are present in the batch, proving it never consumed
+them. Ligand-only input keeps this CCD-free so it runs on plain CI.
 """
 
 from __future__ import annotations
@@ -25,7 +26,41 @@ from nesso.data.yaml_input import parse_yaml
 from nesso.model.models.nesso1 import Nesso1
 from numpy.random import RandomState
 
-REMOVED_KEYS = {"disto_target", "token_to_rep_atom"}
+# The complete set of tensors `NessoFeaturizer.process` is expected to return.
+# Asserting the exact set (rather than only the absence of the two removed keys)
+# makes this a contract on the featurizer output: adding or dropping any feature
+# without updating this list fails the test.
+EXPECTED_FEATURE_KEYS = frozenset(
+    {
+        # token-level
+        "asym_id",
+        "entity_id",
+        "mol_type",
+        "pocket_feature",
+        "res_type",
+        "residue_index",
+        "sym_id",
+        "token_bonds",
+        "token_disto_mask",
+        "token_index",
+        "token_pad_mask",
+        "type_bonds",
+        # atom-level
+        "atom_pad_mask",
+        "atom_resolved_mask",
+        "atom_to_token",
+        "coords",
+        "ref_atom_name_chars",
+        "ref_charge",
+        "ref_chirality",
+        "ref_element",
+        "ref_hybridization",
+        "ref_pos",
+        "ref_space_uid",
+        # sequence embedding
+        "s_esm",
+    }
+)
 
 _LIGAND_SMILES = "Cc1ccc(NC(=O)c2ccc(CN3CCN(C)CC3)cc2)cc1Nc1nccc(-c2cccnc2)n1"
 _YAML = (
@@ -37,7 +72,8 @@ _YAML = (
 )
 
 
-def _featurize(tmp_path: Path) -> dict:
+def _raw_features(tmp_path: Path) -> dict:
+    """Exactly what ``NessoFeaturizer.process`` returns, before collation."""
     mol_dir = tmp_path / "rdkit_conformers"
     structures_dir = tmp_path / "structures"
     esm_dir = tmp_path / "esm"
@@ -76,6 +112,12 @@ def _featurize(tmp_path: Path) -> dict:
         binder_pocket_conditioned_prop=0.0,
         max_tokens=None,
     )
+    return feats
+
+
+def _featurize(tmp_path: Path) -> dict:
+    """A collated single-record batch, as the model receives it."""
+    feats = _raw_features(tmp_path)
     feats["affinity_token_mask"] = (feats["mol_type"] == 3).float()
     return inference_collate([feats])
 
@@ -123,13 +165,14 @@ def _assert_forward_ignores_injection(batch: dict, model: Nesso1) -> None:
             assert torch.equal(value, out_injected[key]), key
 
 
-def test_featurizer_omits_training_targets(tmp_path: Path) -> None:
-    batch = _featurize(tmp_path)
-    keys = {k for k, v in batch.items() if isinstance(v, torch.Tensor)}
-    assert REMOVED_KEYS.isdisjoint(keys), keys & REMOVED_KEYS
-    # Sanity: the live features the model does read are still present.
-    for live in ("res_type", "s_esm", "atom_to_token", "token_pad_mask"):
-        assert live in keys, live
+def test_featurizer_emits_expected_keys(tmp_path: Path) -> None:
+    """The featurizer output must match the expected feature set exactly."""
+    keys = set(_raw_features(tmp_path))
+
+    missing = EXPECTED_FEATURE_KEYS - keys
+    unexpected = keys - EXPECTED_FEATURE_KEYS
+    assert not missing, f"missing expected features: {sorted(missing)}"
+    assert not unexpected, f"unexpected features: {sorted(unexpected)}"
 
 
 def test_trunk_forward_ignores_injected_targets(tmp_path: Path) -> None:
