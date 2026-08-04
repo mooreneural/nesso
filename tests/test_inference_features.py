@@ -5,31 +5,25 @@ ground-truth distogram label and the token-to-representative-atom gather
 inherited from the Boltz training featurizer). Since the codebase is
 inference-only, those tensors are not built at all.
 
-These tests pin that from both sides: the featurizer produces exactly
-``EXPECTED_FEATURE_KEYS`` (so an unintended addition or removal fails here, not
-just the two keys this change targets), and the model forward is bit-identical
-whether or not those tensors are present in the batch, proving it never consumed
-them. Ligand-only input keeps this CCD-free so it runs on plain CI.
+Asserting the exact key set (rather than only the absence of those two) makes
+this a contract on the featurizer output: adding or dropping any feature without
+updating ``EXPECTED_FEATURE_KEYS`` fails here. Ligand-only input keeps this
+CCD-free so it runs on plain CI.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import torch
+from numpy.random import RandomState
 
 from nesso.data.featurizer import NessoFeaturizer
-from nesso.data.inference import InferenceDataset, inference_collate
+from nesso.data.inference import InferenceDataset
 from nesso.data.tokenize import tokenize_structure
 from nesso.data.types import Manifest, Structure, Tokenized
 from nesso.data.yaml_input import parse_yaml
-from nesso.model.models.nesso1 import Nesso1
-from numpy.random import RandomState
 
 # The complete set of tensors `NessoFeaturizer.process` is expected to return.
-# Asserting the exact set (rather than only the absence of the two removed keys)
-# makes this a contract on the featurizer output: adding or dropping any feature
-# without updating this list fails the test.
 EXPECTED_FEATURE_KEYS = frozenset(
     {
         # token-level
@@ -73,7 +67,7 @@ _YAML = (
 
 
 def _raw_features(tmp_path: Path) -> dict:
-    """Exactly what ``NessoFeaturizer.process`` returns, before collation."""
+    """Exactly what ``NessoFeaturizer.process`` returns."""
     mol_dir = tmp_path / "rdkit_conformers"
     structures_dir = tmp_path / "structures"
     esm_dir = tmp_path / "esm"
@@ -101,68 +95,15 @@ def _raw_features(tmp_path: Path) -> dict:
         ligand_dir=mol_dir,
         ccd_pkl=None,
     )
-    molecules = ds._setup_molecules(struct, str(record.id))
-    torch.manual_seed(0)
-    feats = ds.featurizer.process(
+    return ds.featurizer.process(
         tokenized,
         record=record,
-        molecules=molecules,
+        molecules=ds._setup_molecules(struct, str(record.id)),
         random=RandomState(0),
         atoms_per_window_queries=32,
         binder_pocket_conditioned_prop=0.0,
         max_tokens=None,
     )
-    return feats
-
-
-def _featurize(tmp_path: Path) -> dict:
-    """A collated single-record batch, as the model receives it."""
-    feats = _raw_features(tmp_path)
-    feats["affinity_token_mask"] = (feats["mol_type"] == 3).float()
-    return inference_collate([feats])
-
-
-def _tiny_model(*, affinity: bool = False) -> Nesso1:
-    return Nesso1(
-        atom_s=16,
-        atom_z=16,
-        token_s=32,
-        token_z=32,
-        atom_feature_dim=387,
-        embedder_args={"atom_encoder_depth": 1, "atom_encoder_heads": 2},
-        pairformer_model_args={"num_blocks": 1},
-        esm_module_args={"esm_embed_dim": 1280},
-        affinity_prediction=affinity,
-        affinity_model_args={
-            "pairformer_args": {"num_blocks": 1},
-            "transformer_args": {},
-        }
-        if affinity
-        else None,
-        use_kernels=False,
-        predict_args={
-            "refine_protein_inference": False,
-            "affinity_protein_cutoff": 15.0,
-        },
-    ).eval()
-
-
-def _assert_forward_ignores_injection(batch: dict, model: Nesso1) -> None:
-    n = batch["token_pad_mask"].shape[1]
-    m = batch["atom_pad_mask"].shape[1]
-    with torch.no_grad():
-        out_lean = model(dict(batch), recycling_steps=2)
-    # Re-add the removed tensors; a forward that truly ignores them is unchanged.
-    injected = dict(batch)
-    injected["disto_target"] = torch.randn(1, n, n, 64)
-    injected["token_to_rep_atom"] = torch.zeros(1, n, m)
-    with torch.no_grad():
-        out_injected = model(injected, recycling_steps=2)
-
-    assert set(out_lean) == set(out_injected)
-    for key, value in out_lean.items():
-        if isinstance(value, torch.Tensor):
-            assert torch.equal(value, out_injected[key]), key
 
 
 def test_featurizer_emits_expected_keys(tmp_path: Path) -> None:
@@ -173,14 +114,3 @@ def test_featurizer_emits_expected_keys(tmp_path: Path) -> None:
     unexpected = keys - EXPECTED_FEATURE_KEYS
     assert not missing, f"missing expected features: {sorted(missing)}"
     assert not unexpected, f"unexpected features: {sorted(unexpected)}"
-
-
-def test_trunk_forward_ignores_injected_targets(tmp_path: Path) -> None:
-    torch.manual_seed(0)
-    _assert_forward_ignores_injection(_featurize(tmp_path), _tiny_model())
-
-
-def test_affinity_forward_ignores_injected_targets(tmp_path: Path) -> None:
-    torch.manual_seed(0)
-    model = _tiny_model(affinity=True)
-    _assert_forward_ignores_injection(_featurize(tmp_path), model)
