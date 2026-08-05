@@ -3,6 +3,7 @@
 Adapted from https://github.com/jwohlwend/boltz, MIT License, Copyright (c) 2024 Jeremy Wohlwend.
 """
 
+import hashlib
 import pickle
 from dataclasses import replace
 from pathlib import Path
@@ -109,6 +110,21 @@ def collate(
 
 INFERENCE_EXCLUDED_KEYS = frozenset({"record", "exception", "record_id"})
 
+# numpy seeds must fit in uint32.
+_MAX_NUMPY_SEED = 2**32
+
+
+def record_rng_seed(record_id: str) -> int:
+    """Per-record RNG seed derived from the record id.
+
+    Keyed on identity rather than on the dataset index, so a record's features do
+    not change when the surrounding batch does. The index shifts whenever inputs
+    are added, removed, renamed, or reordered, and ``hash()`` is salted per
+    process, so neither is usable here.
+    """
+    digest = hashlib.sha256(record_id.encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") % _MAX_NUMPY_SEED
+
 
 def inference_collate(data: list[dict[str, Tensor]]) -> dict[str, Tensor]:
     # Must be module-level (picklable) for DataLoader multiprocessing on macOS/Windows.
@@ -199,7 +215,7 @@ class InferenceDataset(Dataset):
                 structure=structure,
                 record=record,
             )
-            random = RandomState(idx)
+            random = RandomState(record_rng_seed(str(record_id)))
             molecules = self._setup_molecules(structure, str(record_id))
             features = self.featurizer.process(
                 tokenized,

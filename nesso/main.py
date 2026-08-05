@@ -196,8 +196,13 @@ def preprocess_yamls(
     """
     structures_dir.mkdir(parents=True, exist_ok=True)
     records_dir.mkdir(parents=True, exist_ok=True)
-    records: list[Record] = []
     failed: list[str] = []
+
+    # Results are collected by submission index, not completion order:
+    # `as_completed` yields whichever worker finishes first, so appending here
+    # would make the manifest order depend on scheduling and hence on
+    # `--num_workers`. Downstream that order is visible as the dataset index.
+    by_index: dict[int, Record] = {}
 
     with ProcessPoolExecutor(
         max_workers=max(1, num_workers), initializer=_init_worker, initargs=(ccd_pkl,)
@@ -205,17 +210,18 @@ def preprocess_yamls(
         futures = {
             executor.submit(
                 _process_single_yaml, yp, mol_dir, structures_dir, records_dir, seed
-            ): yp
-            for yp in yaml_paths
+            ): (i, yp)
+            for i, yp in enumerate(yaml_paths)
         }
         for future in tqdm(as_completed(futures), total=len(futures), desc="YAML"):
-            yp = futures[future]
+            i, yp = futures[future]
             try:
-                records.append(future.result())
+                by_index[i] = future.result()
             except Exception as e:
                 failed.append(yp.stem)
                 print(f"Error processing YAML {yp.name}: {e}", file=sys.stderr)
 
+    records = [by_index[i] for i in sorted(by_index)]
     return Manifest(records), failed
 
 

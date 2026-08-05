@@ -10,8 +10,13 @@ YAML gave different atomistic features on every run even though
   RNG, which ``seed_everything(..., workers=True)`` seeds per DataLoader worker,
   making the result depend on ``--num_workers``.
 
-These tests pin both. They are ligand-only so they need no CCD asset and run on
-plain CI.
+A third source sat between them: ``preprocess_yamls`` collected results via
+``as_completed``, so the manifest order followed worker scheduling rather than
+input order, and the per-record RNG was seeded from that position. Seeding the
+augmentation was therefore not enough on its own.
+
+These tests pin all three. They are ligand-only so they need no CCD asset and run
+on plain CI.
 """
 
 from __future__ import annotations
@@ -24,7 +29,11 @@ from rdkit import Chem
 from torch.utils.data import DataLoader
 
 from nesso.data.featurizer import NessoFeaturizer
-from nesso.data.inference import InferenceDataset, inference_collate
+from nesso.data.inference import (
+    InferenceDataset,
+    inference_collate,
+    record_rng_seed,
+)
 from nesso.data.types import Manifest
 from nesso.data.yaml_input import (
     DEFAULT_CONFORMER_SEED,
@@ -91,7 +100,9 @@ def test_conformer_seed_can_be_opted_out() -> None:
     assert mol.GetNumConformers() == 1
 
 
-def _ref_pos_by_record(tmp_path: Path, num_workers: int) -> dict[str, np.ndarray]:
+def _ref_pos_by_record(
+    tmp_path: Path, num_workers: int, n_records: int = 3, reverse: bool = False
+) -> dict[str, np.ndarray]:
     """Featurize several records through a real DataLoader at a given worker count."""
     mol_dir = tmp_path / "rdkit_conformers"
     struct_dir = tmp_path / "structures"
@@ -100,7 +111,7 @@ def _ref_pos_by_record(tmp_path: Path, num_workers: int) -> dict[str, np.ndarray
         directory.mkdir(parents=True, exist_ok=True)
 
     records = []
-    for i in range(3):
+    for i in range(n_records):
         yaml_path = tmp_path / f"lig{i}.yaml"
         yaml_path.write_text(_YAML)
         struct, record, _, _ = parse_yaml(
@@ -108,6 +119,9 @@ def _ref_pos_by_record(tmp_path: Path, num_workers: int) -> dict[str, np.ndarray
         )
         struct.dump(struct_dir / f"{record.id}.npz")
         records.append(record)
+
+    if reverse:
+        records = list(reversed(records))
 
     dataset = InferenceDataset(
         manifest=Manifest(records),
@@ -191,3 +205,32 @@ def test_conformer_independent_of_batch_composition_and_order(tmp_path: Path) ->
 
     assert np.array_equal(alone[_SMILES], with_others[_SMILES])
     assert np.array_equal(alone[_SMILES], reordered[_SMILES])
+
+
+def test_record_rng_seed_depends_on_id_not_position() -> None:
+    """The per-record RNG must be keyed on identity, not on the dataset index.
+
+    ``as_completed`` in ``preprocess_yamls`` made the manifest order follow worker
+    scheduling, so seeding from the index made ``ref_pos`` depend on
+    ``--num_workers``. Adding, removing or renaming inputs shifts it too.
+    """
+    assert record_rng_seed("lig") == record_rng_seed("lig")
+    assert record_rng_seed("lig") != record_rng_seed("other")
+    # numpy requires a uint32 seed.
+    assert 0 <= record_rng_seed("lig") < 2**32
+
+
+def test_ref_pos_independent_of_record_position(tmp_path: Path) -> None:
+    """The same record must featurize identically wherever it sits in the batch.
+
+    Seeding the per-record RNG from the dataset index made a record's features
+    depend on its position, so reordering the manifest (which `as_completed` did
+    on its own at ``--num_workers > 1``) changed ``ref_pos``.
+    """
+    forward = _ref_pos_by_record(tmp_path / "fwd", 0, n_records=3)
+    # Identical records, reversed order, so every index changes.
+    backward = _ref_pos_by_record(tmp_path / "rev", 0, n_records=3, reverse=True)
+
+    assert set(forward) == set(backward)
+    for key in forward:
+        assert np.array_equal(forward[key], backward[key]), key
